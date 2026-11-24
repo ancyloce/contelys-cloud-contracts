@@ -1,0 +1,692 @@
+openapi: 3.0.3
+info:
+  title: Identity
+  version: 1.0.0
+  license:
+    name: Proprietary
+  description: >-
+    Identity registers people, signs browsers in as Keycloak's confidential client, decides
+    admission on every request, and issues the internal tokens and workload tokens that other
+    deployables verify. Its detailed design, `services/identity/docs/DESIGN.md`, decides what
+    this contract describes, and sections 05 to 10 of it give the reasons.
+
+
+    The external routes under `/api/identity/v1/` are published by Edge through Identity's
+    route fragment. The internal operations under `/internal/v1/` are reached through Edge's
+    internal listener, except the authentication endpoint, which only Edge's loopback listener
+    reaches. No operation takes an `Idempotency-Key` (ADR 0062), and no path holds a parameter
+    (ADR 0048). Every error is the problem body of ADR 0054 with one of the codes listed under
+    `IdentityErrorCode`, and no error carries an address, a name, a credential or a token.
+servers:
+  - url: /
+    description: Identity, on each listener that reaches it.
+tags:
+  - name: external
+    description: Routes that Edge publishes on the application hostname.
+  - name: internal
+    description: Operations for other deployables, which no route fragment can claim.
+paths:
+  /api/identity/v1/registrations:
+    post:
+      tags: [external]
+      operationId: register
+      summary: Register an address.
+      description: >-
+        Anonymous. Takes an address and nothing else, and answers 202 with no body whatever the
+        address, so that the answer tells nobody whether the address has an account. Identity
+        then creates the Keycloak account in a job, and Keycloak sends its link. At most three
+        requests an hour for one address have an effect; the others are answered 202 too and
+        send nothing.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Registration'
+      responses:
+        '202':
+          description: Accepted, whatever the address.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+        '400':
+          $ref: '#/components/responses/InvalidRequestNoStore'
+        '503':
+          $ref: '#/components/responses/UnavailableNoStore'
+  /api/identity/v1/session/sign-in:
+    get:
+      tags: [external]
+      operationId: startSignIn
+      summary: Start a sign-in at Keycloak.
+      description: >-
+        Anonymous. Records an attempt with a state, a PKCE verifier and a nonce, binds it to the
+        browser with the cookie `__Host-sign-in`, and redirects to Keycloak's authorization
+        endpoint on the authentication hostname.
+      security: []
+      parameters:
+        - name: returnTo
+          in: query
+          required: false
+          description: The path of the authoring app to return to after the sign-in. It must be a path of the application origin. Without it the browser returns to `/`.
+          schema:
+            type: string
+            maxLength: 2048
+            pattern: '^/([^/\\].*)?$'
+      responses:
+        '302':
+          description: Redirect to Keycloak's authorization endpoint.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+            Set-Cookie:
+              description: '`__Host-sign-in`, with `Secure`, `HttpOnly`, `SameSite=Lax`, `Path=/` and no `Domain`, valid for ten minutes.'
+              schema:
+                type: string
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+        '400':
+          description: '`invalid_return_path`: the return path is not a path of the application origin.'
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/IdentityProblem'
+        '503':
+          $ref: '#/components/responses/UnavailableNoStore'
+  /api/identity/v1/session/callback:
+    get:
+      tags: [external]
+      operationId: completeSignIn
+      summary: Complete a sign-in with Keycloak's code.
+      description: >-
+        Anonymous. The state must match the attempt that the cookie `__Host-sign-in` names, and an
+        attempt is used once. Identity exchanges the code at Keycloak, verifies the ID token,
+        finds or creates the principal, records the session and discards Keycloak's tokens.
+      security: []
+      parameters:
+        - name: code
+          in: query
+          required: false
+          description: Keycloak's authorization code, the one secret that ADR 0051 allows in a query string.
+          schema:
+            type: string
+            maxLength: 2048
+        - name: state
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 512
+        - name: error
+          in: query
+          required: false
+          description: Set by Keycloak when the sign-in failed there.
+          schema:
+            type: string
+            maxLength: 256
+        - name: __Host-sign-in
+          in: cookie
+          required: false
+          schema:
+            type: string
+            maxLength: 128
+      responses:
+        '302':
+          description: Signed in. The session cookie is set, the attempt's cookie is cleared, and the browser returns to the path of the attempt.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+            Set-Cookie:
+              description: '`__Host-session`, a random 256-bit value with `Secure`, `HttpOnly`, `SameSite=Strict`, `Path=/` and no `Domain`, and `__Host-sign-in` cleared.'
+              schema:
+                type: string
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+        '400':
+          description: '`sign_in_failed`: no attempt matches the state, the attempt was used or has expired, Keycloak reported an error, or the ID token or its address did not verify. No session is created.'
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/IdentityProblem'
+        '403':
+          description: '`principal_not_active`: the principal is disabled or erased. No session is created.'
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/IdentityProblem'
+        '503':
+          $ref: '#/components/responses/UnavailableNoStore'
+  /api/identity/v1/session/sign-out:
+    post:
+      tags: [external]
+      operationId: signOut
+      summary: Sign the browser out.
+      description: >-
+        Ends the session that the `sid` claim of the internal token names, clears the session
+        cookie, and then has a job delete Keycloak's login session.
+      security:
+        - internalToken: []
+      responses:
+        '204':
+          description: Signed out.
+          headers:
+            Set-Cookie:
+              description: '`__Host-session` cleared.'
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/TokenInvalid'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/identity/v1/me:
+    get:
+      tags: [external]
+      operationId: getMe
+      summary: Read the caller's own principal.
+      security:
+        - internalToken: []
+      responses:
+        '200':
+          description: The caller's principal.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Me'
+        '401':
+          $ref: '#/components/responses/TokenInvalid'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /internal/v1/authentication:
+    get:
+      tags: [internal]
+      operationId: authenticate
+      summary: Decide admission for one request.
+      description: >-
+        Edge's forward-auth call, once for every request on a route that is not anonymous. Only
+        Edge may call it: Identity requires a client certificate named `edge` on this operation
+        alone, and Edge's internal listener refuses its path for every caller. Identity reads the
+        session and its principal from its database on every call and caches nothing. It decides
+        in this order: the cross-site rule (403), the session (401), the principal (403), and
+        admits with 200. When it cannot read its database, or its deadline passes, it answers
+        503. These four answers are the only ones, and Edge depends on that. Edge replaces every
+        body, so no body reaches a caller.
+      security: []
+      x-contelys-authentication:
+        deadlineMilliseconds: 250
+        limitKeyHeader: X-Contelys-Limit-Key
+        limitKeyMaxBytes: 64
+        internalTokenMaxBytes: 1024
+      parameters:
+        - name: __Host-session
+          in: cookie
+          required: false
+          description: The session cookie of the request, which Edge forwards.
+          schema:
+            type: string
+            maxLength: 128
+        - name: Origin
+          in: header
+          required: false
+          description: The `Origin` of the request. A WebSocket handshake always carries one.
+          schema:
+            type: string
+            maxLength: 2048
+        - name: X-Forwarded-Method
+          in: header
+          required: true
+          description: The method of the request.
+          schema:
+            type: string
+            maxLength: 16
+        - name: X-Forwarded-Proto
+          in: header
+          required: true
+          description: The scheme of the request.
+          schema:
+            type: string
+            enum: [https, wss]
+        - name: X-Forwarded-Host
+          in: header
+          required: true
+          description: The host of the request.
+          schema:
+            type: string
+            maxLength: 253
+        - name: X-Forwarded-Uri
+          in: header
+          required: true
+          description: The path of the request with its query string.
+          schema:
+            type: string
+            maxLength: 8192
+        - name: X-Request-Id
+          in: header
+          required: true
+          description: The request ID that Edge set. It becomes the `jti` of the internal token.
+          schema:
+            type: string
+            maxLength: 128
+        - name: traceparent
+          in: header
+          required: false
+          description: The W3C trace context of the request.
+          schema:
+            type: string
+            maxLength: 128
+        - name: tracestate
+          in: header
+          required: false
+          schema:
+            type: string
+            maxLength: 512
+      responses:
+        '200':
+          description: >-
+            Admitted. The answer carries the internal token and the limit key, never a `Cookie`
+            and never a body.
+          headers:
+            Authorization:
+              required: true
+              description: '`Bearer` and the internal token, a JWT with `typ` `internal+jwt` signed with Ed25519 (ADR 0052), of at most 1,024 bytes.'
+              schema:
+                type: string
+                maxLength: 1031
+                pattern: '^Bearer [A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$'
+            X-Contelys-Limit-Key:
+              required: true
+              description: The limit key of the principal, by which Edge counts the caller's rate limit. It is not the principal's identifier and never changes.
+              schema:
+                type: string
+                maxLength: 64
+                pattern: '^[A-Za-z0-9_-]{1,64}$'
+        '401':
+          description: '`session_required`: no cookie, or a session that is unknown, ended or past one of its limits.'
+          headers:
+            WWW-Authenticate:
+              required: true
+              schema:
+                type: string
+                enum: [Session]
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/IdentityProblem'
+        '403':
+          description: '`cross_site_request`: the `Origin` is not the application origin, or an unsafe method carries no `Origin`. `principal_not_active`: the principal is disabled or erased.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/IdentityProblem'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /internal/v1/keys:
+    get:
+      tags: [internal]
+      operationId: getKeys
+      summary: Read the key set.
+      description: >-
+        The verification keys of both kinds of token, the internal token and the workload token,
+        each kind with keys of its own. A new key appears here before Identity signs with it,
+        and an old key stays until the tokens it signed have expired. No token is needed.
+      security: []
+      responses:
+        '200':
+          description: The key set.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JsonWebKeySet'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /internal/v1/workload-tokens:
+    post:
+      tags: [internal]
+      operationId: issueWorkloadToken
+      summary: Issue a workload token for a call with no user.
+      description: >-
+        A deployable authenticates with HTTP Basic, made of its slug and its secret, and names
+        the one deployable it wants to call. The token's `operations` claim lists the
+        `operationId` of each operation that the target's access file permits for that pair.
+        It lives five minutes; a caller keeps it until shortly before it expires.
+      security:
+        - deployableSecret: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WorkloadTokenRequest'
+      responses:
+        '200':
+          description: The workload token.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkloadToken'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          description: '`credentials_invalid`: the slug is unknown or the secret is wrong.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/IdentityProblem'
+        '403':
+          description: '`target_not_permitted`: no access file lists an operation of the target for the caller.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/IdentityProblem'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /internal/v1/principal-lookups:
+    post:
+      tags: [internal]
+      operationId: lookUpPrincipals
+      summary: Look up 1 to 100 principals.
+      description: >-
+        Answers each principal that Identity knows with its state, and with its name and its
+        address unless it is erased, and lists the identifiers that it does not know. The
+        address is always verified, because a principal is created only from a verified address.
+        A single lookup is a call with one identifier. The caller needs a workload token whose
+        `operations` include `lookUpPrincipals`.
+      security:
+        - workloadToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PrincipalLookup'
+      responses:
+        '200':
+          description: The principals found, and the identifiers not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PrincipalLookupResult'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/TokenInvalid'
+        '403':
+          description: '`operation_not_permitted`: the workload token does not permit `lookUpPrincipals`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/IdentityProblem'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /internal/v1/back-channel-logout:
+    post:
+      tags: [internal]
+      operationId: receiveBackChannelLogout
+      summary: Receive Keycloak's back-channel logout.
+      description: >-
+        Keycloak's OpenID Connect back-channel logout, through the internal listener, with a
+        logout token and no workload token. Identity verifies the logout token against the
+        realm's keys and ends every session with its login-session identifier. A logout token
+        for a session that has already ended changes nothing.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [logout_token]
+              properties:
+                logout_token:
+                  type: string
+                  maxLength: 8192
+      responses:
+        '200':
+          description: The logout token was accepted.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+        '400':
+          description: '`invalid_logout_token`: the logout token did not verify.'
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/IdentityProblem'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+components:
+  securitySchemes:
+    internalToken:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >-
+        The internal token that Edge puts in place of the session cookie once Identity has
+        admitted the request: `typ` `internal+jwt`, issuer `urn:contelys:identity`, audience
+        `urn:contelys:domain-services` (ADR 0052).
+    workloadToken:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >-
+        A workload token of the calling deployable: `typ` `workload+jwt`, audience
+        `urn:contelys:identity` (ADR 0040, ADR 0052).
+    deployableSecret:
+      type: http
+      scheme: basic
+      description: The calling deployable's slug and its secret.
+  headers:
+    NoStore:
+      description: The answer is never cached.
+      required: true
+      schema:
+        type: string
+        enum: [no-store]
+    Location:
+      required: true
+      schema:
+        type: string
+        format: uri-reference
+  responses:
+    InvalidRequest:
+      description: '`invalid_request`: the request does not match this contract.'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/IdentityProblem'
+    InvalidRequestNoStore:
+      description: '`invalid_request`: the request does not match this contract. Says nothing about whether an address has an account.'
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/NoStore'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/IdentityProblem'
+    TokenInvalid:
+      description: '`token_invalid`: the token is missing, expired, altered, or of the wrong kind.'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/IdentityProblem'
+    Unavailable:
+      description: '`unavailable`: Identity cannot read its database, or the operation cannot be completed now.'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/IdentityProblem'
+    UnavailableNoStore:
+      description: '`unavailable`: Identity cannot read its database, or Keycloak cannot be reached.'
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/NoStore'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/IdentityProblem'
+  schemas:
+    IdentityErrorCode:
+      type: string
+      description: Every code that Identity answers. Adding one is an additive change, and removing one is not.
+      enum:
+        - invalid_request
+        - invalid_return_path
+        - sign_in_failed
+        - session_required
+        - token_invalid
+        - credentials_invalid
+        - cross_site_request
+        - principal_not_active
+        - target_not_permitted
+        - operation_not_permitted
+        - invalid_logout_token
+        - unavailable
+    IdentityProblem:
+      description: The problem body of ADR 0054 with one of Identity's codes.
+      allOf:
+        - $ref: '../shared/problem.yaml#/components/schemas/Problem'
+        - type: object
+          properties:
+            code:
+              $ref: '#/components/schemas/IdentityErrorCode'
+    PrincipalId:
+      type: string
+      description: The identifier of a principal. It is random, never reused, and opaque to every caller, which compares it as a string.
+      pattern: '^[A-Za-z0-9-]{1,64}$'
+    Address:
+      type: string
+      format: email
+      maxLength: 254
+      description: An email address, which Keycloak has verified.
+    Name:
+      type: string
+      minLength: 1
+      maxLength: 255
+      description: The person's name, as one value.
+    PrincipalState:
+      type: string
+      enum: [active, disabled, erased]
+    Registration:
+      type: object
+      additionalProperties: false
+      required: [address]
+      properties:
+        address:
+          type: string
+          format: email
+          maxLength: 254
+    Me:
+      type: object
+      required: [id, name, address]
+      properties:
+        id:
+          $ref: '#/components/schemas/PrincipalId'
+        name:
+          $ref: '#/components/schemas/Name'
+        address:
+          $ref: '#/components/schemas/Address'
+    WorkloadTokenRequest:
+      type: object
+      additionalProperties: false
+      required: [target]
+      properties:
+        target:
+          type: string
+          description: The slug of the one deployable that the token is for.
+          pattern: '^[a-z][a-z0-9-]{0,62}$'
+    WorkloadToken:
+      type: object
+      required: [token, expiresAt]
+      properties:
+        token:
+          type: string
+          description: A JWT with `typ` `workload+jwt`, `sub` and `aud` as `urn:contelys:<slug>`, and the `operations` claim.
+        expiresAt:
+          type: string
+          format: date-time
+    PrincipalLookup:
+      type: object
+      additionalProperties: false
+      required: [principals]
+      properties:
+        principals:
+          type: array
+          minItems: 1
+          maxItems: 100
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/PrincipalId'
+    FoundPrincipal:
+      type: object
+      required: [id, state]
+      properties:
+        id:
+          $ref: '#/components/schemas/PrincipalId'
+        state:
+          $ref: '#/components/schemas/PrincipalState'
+        name:
+          allOf:
+            - $ref: '#/components/schemas/Name'
+          description: Present unless the principal is erased.
+        address:
+          allOf:
+            - $ref: '#/components/schemas/Address'
+          description: Present unless the principal is erased. Always verified.
+    PrincipalLookupResult:
+      type: object
+      required: [principals, unknown]
+      properties:
+        principals:
+          type: array
+          items:
+            $ref: '#/components/schemas/FoundPrincipal'
+        unknown:
+          type: array
+          items:
+            $ref: '#/components/schemas/PrincipalId'
+    JsonWebKeySet:
+      type: object
+      required: [keys]
+      properties:
+        keys:
+          type: array
+          items:
+            $ref: '#/components/schemas/Ed25519Key'
+    Ed25519Key:
+      type: object
+      description: A public Ed25519 key in the form of RFC 8037, which go-jose and the Node library `jose` read.
+      required: [kty, crv, x, kid, use, alg]
+      properties:
+        kty:
+          type: string
+          enum: [OKP]
+        crv:
+          type: string
+          enum: [Ed25519]
+        x:
+          type: string
+          description: The public key, base64url without padding.
+          pattern: '^[A-Za-z0-9_-]{43}$'
+        kid:
+          type: string
+          maxLength: 64
+        use:
+          type: string
+          enum: [sig]
+        alg:
+          type: string
+          enum: [EdDSA]

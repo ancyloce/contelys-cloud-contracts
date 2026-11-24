@@ -1,0 +1,64 @@
+openapi: 3.0.3
+info:
+  title: Contelys problem body
+  version: 1.0.0
+  description: >-
+    The one error body of every contract in the shared contracts (ADR 0054): problem details
+    of RFC 9457, with a stable code that names the cause, the request ID and the correlation ID.
+    A client decides by the code and the status, never by the title or the detail, which are
+    written for people. A body never carries an address, a name, a credential or a token.
+    Each contract lists the codes it answers. Adding a code is an additive change, and removing
+    one is not (ADR 0032).
+  license:
+    name: Proprietary
+servers:
+  - url: /
+paths: {}
+components:
+  schemas:
+    Problem:
+      type: object
+      description: Problem details of RFC 9457, served as `application/problem+json`.
+      required:
+        - type
+        - title
+        - status
+        - code
+        - requestId
+        - correlationId
+      properties:
+        type:
+          type: string
+          format: uri-reference
+          description: A URI reference that identifies the kind of problem. `about:blank` when the status says enough.
+          example: about:blank
+        title:
+          type: string
+          maxLength: 200
+          description: A short summary for people. It does not change between occurrences of one code.
+        status:
+          type: integer
+          minimum: 400
+          maximum: 599
+          description: The HTTP status of the answer.
+        detail:
+          type: string
+          maxLength: 1000
+          description: An explanation of this occurrence, for people. It carries no personal data.
+        instance:
+          type: string
+          format: uri-reference
+          description: A URI reference that identifies this occurrence.
+        code:
+          type: string
+          pattern: '^[a-z][a-z0-9_]{0,63}$'
+          description: The stable name of the cause. The contract of the operation lists its codes.
+          example: unavailable
+        requestId:
+          type: string
+          maxLength: 128
+          description: The ID of the request, as Edge set it in `X-Request-Id`.
+        correlationId:
+          type: string
+          maxLength: 128
+          description: The ID that correlates the request with the work it caused across deployables.
