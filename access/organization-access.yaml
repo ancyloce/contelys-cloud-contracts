@@ -1,0 +1,15 @@
+# Who may call Organization Access's operations with a workload token, in the form of
+# access-file.schema.json. Organization Access holds protected writes, so it is a registered
+# domain service: Identity installs the minimums of principals in it. It lists Identity alone for
+# the shared operation, which the schema allows. This departs from ADR 0068, which has every
+# registered domain service list Identity and Organization Access, because Organization Access
+# never calls its own operation: the lock on a member's row is its barrier for its own memberships
+# (Organization Access's detailed design, section 09). Its other
+# operations take the caller's internal token and need no line: the external routes, and the
+# scopes question, which no caller with no user asks in phase 1.
+protected_writes: true
+operations:
+  getRole: [collaboration]
+  registerScope: [projects, sites]
+  lookUpInvitation: [notifications]
+  installMinimumAuthorityVersion: [identity]

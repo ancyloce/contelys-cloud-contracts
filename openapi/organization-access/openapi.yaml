@@ -1,0 +1,1294 @@
+openapi: 3.0.3
+info:
+  title: Organization Access
+  version: 1.0.0
+  license:
+    name: Proprietary
+  description: >-
+    Organization Access keeps organizations, their members, the roles that members hold and the
+    invitations that bring people in, and it answers every other domain service one question:
+    which role a principal holds on a scope now (ADR 0056). Its detailed design,
+    `services/organization-access/docs/DESIGN.md`, decides what this contract describes, and
+    sections 03 to 09 of it give the reasons.
+
+
+    The external routes under `/api/organization-access/v1/` are published by Edge through
+    Organization Access's route fragment, and every one of them needs an authenticated caller.
+    The internal operations under `/internal/v1/` are reached through Edge's internal listener.
+    The internal listener addresses Organization Access by its slug, so `/internal/v1/role` is
+    `/organization-access/internal/v1/role` there, and a generated client takes Edge's internal
+    address followed by `/organization-access` as its base address (Edge's detailed design,
+    section 03). Creating an organization and creating an invitation take an `Idempotency-Key`
+    (ADR 0062), and no other operation does: a `PUT` or a `DELETE` names what it changes, and an
+    acceptance is decided by the invitation's state, so repeating one changes nothing more.
+    Sending an invitation again creates nothing either, but each call sends the email again and
+    counts towards the limit of invitations. Every
+    identifier in a path is 1 to 64 letters, digits and hyphens, so no path parameter can hold a
+    slash (ADR 0048). Every error is the problem body of ADR 0054 with one of the codes listed
+    under `OrganizationAccessErrorCode`, except those of the shared operation, which lists its
+    own, and no error carries an address, a name, a credential or a token.
+
+
+    A member is named by their principal on every external route. The membership identifier,
+    which never changes, also when a removed person joins again, appears only in the role answer
+    and in the shared operation. Under `/organizations/{organization}`, a caller who is no active
+    member of the organization is answered 404 `not_found`, like one asking about an organization
+    that does not exist. A member whose role does not allow a read is answered 404 too, and one
+    whose role does not allow a change 403 `role_too_low`.
+
+
+    Organization Access is a registered domain service. It serves the shared operation of
+    ADR 0068 at the path below, which refers to `../shared/minimum-authority-version.yaml`, and
+    declares the `workloadToken` scheme that the operation names. Every change made for a caller
+    is a protected write, refused with 403 `principal_not_active` when the caller's internal token
+    carries an authority version below the minimum that Identity installed for the principal.
+    Organization Access installs no minimum for its own memberships, and never calls its own
+    shared operation: a change reads the caller's member row under a lock that a removal also
+    takes.
+servers:
+  - url: /
+    description: Organization Access, on each listener that reaches it.
+tags:
+  - name: external
+    description: Routes that Edge publishes on the application hostname.
+  - name: internal
+    description: Operations for other deployables, which no route fragment can claim.
+paths:
+  /api/organization-access/v1/organizations:
+    post:
+      tags: [external]
+      operationId: createOrganization
+      summary: Create an organization.
+      description: >-
+        Any signed-in principal. Creates an organization whose first Owner is the caller, with a
+        new membership, in one transaction with the audit record, `OrganizationCreated` and
+        `MemberJoined`. The name need not be unique. A repeat with the same `Idempotency-Key` and
+        the same body gets the first answer (ADR 0062), so a lost answer never creates a second
+        organization.
+      security:
+        - internalToken: []
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrganizationCreation'
+      responses:
+        '201':
+          description: The organization, with the caller as its Owner. A repeat with the same key and the same body gets this answer again.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Organization'
+        '400':
+          $ref: '#/components/responses/InvalidRequestOrKeyMissing'
+        '401':
+          $ref: '#/components/responses/TokenInvalid'
+        '403':
+          $ref: '#/components/responses/PrincipalNotActive'
+        '409':
+          $ref: '#/components/responses/IdempotencyKeyInProgress'
+        '422':
+          $ref: '#/components/responses/IdempotencyKeyReused'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+    get:
+      tags: [external]
+      operationId: listOrganizations
+      summary: List the caller's organizations.
+      description: >-
+        Any signed-in principal. Every organization of which the caller is an active member, each
+        with the caller's role on the organization itself. A member who holds roles only on
+        projects or sites has the role `none` there. A caller who is a member of none gets an
+        empty list.
+      security:
+        - internalToken: []
+      responses:
+        '200':
+          description: The caller's organizations.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrganizationList'
+        '401':
+          $ref: '#/components/responses/TokenInvalid'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/organization-access/v1/organizations/{organization}/members:
+    parameters:
+      - $ref: '#/components/parameters/OrganizationInPath'
+    get:
+      tags: [external]
+      operationId: listMembers
+      summary: List the members of an organization.
+      description: >-
+        A member. The active members with their names and roles, in pages of up to 100 members,
+        in an order that stays the same from one page to the next. Organization Access stores no
+        name: it looks each page up at Identity with one call. A member whose principal Identity
+        answers as erased, or does not know, is listed with their roles and without a name. The
+        list carries no address.
+      security:
+        - internalToken: []
+      parameters:
+        - $ref: '#/components/parameters/CursorInQuery'
+      responses:
+        '200':
+          description: One page of members.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemberPage'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/TokenInvalid'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/UnavailableWithLookup'
+  /api/organization-access/v1/organizations/{organization}/members/{principal}:
+    parameters:
+      - $ref: '#/components/parameters/OrganizationInPath'
+      - $ref: '#/components/parameters/PrincipalInPath'
+    delete:
+      tags: [external]
+      operationId: removeMember
+      summary: Remove a member, or leave.
+      description: >-
+        An Owner or an Admin on the organization removes a member, and any member removes
+        themselves, which is leaving. An Admin may not remove an Owner. One transaction locks the
+        organization and the member, applies the rule of the last Owner, sets the member to
+        removed, deletes their roles, raises the membership's authority version, and writes the
+        operation, the audit record and `MemberRemoved`. From its commit every role answer about
+        the principal in this organization is `none`. The operation has one step for each
+        registered domain service other than Organization Access, and succeeds once each has
+        acknowledged the new minimum through the shared operation. A repeat for a member whose
+        removal has committed changes nothing and gets the operation of that removal, as long as
+        the caller may still read it; the member who left gets 404.
+      security:
+        - internalToken: []
+      responses:
+        '202':
+          description: The removal has committed, and the operation follows its acknowledgements.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Operation'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/TokenInvalid'
+        '403':
+          $ref: '#/components/responses/RoleTooLowOrPrincipalNotActive'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/LastOwner'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/organization-access/v1/organizations/{organization}/members/{principal}/roles/{kind}/{scope}:
+    parameters:
+      - $ref: '#/components/parameters/OrganizationInPath'
+      - $ref: '#/components/parameters/PrincipalInPath'
+      - $ref: '#/components/parameters/KindInPath'
+      - $ref: '#/components/parameters/ScopeInPath'
+    put:
+      tags: [external]
+      operationId: giveRole
+      summary: Give a member a role on a scope, or change it.
+      description: >-
+        As the rules of who may change what allow (Organization Access's detailed design, section 03). A member holds at most one
+        role on a scope, so this replaces the one they hold there. Owner is given on the
+        organization alone, whose `scope` is the organization's own identifier, and only by an
+        Owner. A project or a site must be registered and lie in this organization. Lowering the
+        last Owner is refused. The change writes the audit record and `MemberRoleChanged`, and
+        takes effect at the member's next protected write, and for reads within 60 seconds.
+        Giving the role a member already holds changes nothing.
+      security:
+        - internalToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RoleToGive'
+      responses:
+        '200':
+          description: The role that the member now holds on the scope.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RoleOnScope'
+        '400':
+          description: '`invalid_request`: the request does not match this contract, or it gives Owner on a project or a site.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/OrganizationAccessProblem'
+        '401':
+          $ref: '#/components/responses/TokenInvalid'
+        '403':
+          $ref: '#/components/responses/RoleTooLowOrPrincipalNotActive'
+        '404':
+          description: '`not_found`: the organization or the member does not exist, the caller may not know of it, or the scope is not a registered scope of this organization.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/OrganizationAccessProblem'
+        '409':
+          $ref: '#/components/responses/LastOwner'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+    delete:
+      tags: [external]
+      operationId: takeRole
+      summary: Take a member's role on a scope away.
+      description: >-
+        As the rules of who may change what allow (Organization Access's detailed design, section 03). Taking the last Owner's
+        Owner away is refused. A member whose last role is taken away stays a member with no
+        role, and only a removal ends a membership. Taking a role that the member does not hold
+        changes nothing and is answered 204 too.
+      security:
+        - internalToken: []
+      responses:
+        '204':
+          description: The member holds no role on the scope itself.
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/TokenInvalid'
+        '403':
+          $ref: '#/components/responses/RoleTooLowOrPrincipalNotActive'
+        '404':
+          description: '`not_found`: the organization or the member does not exist, the caller may not know of it, or the scope is not a registered scope of this organization.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/OrganizationAccessProblem'
+        '409':
+          $ref: '#/components/responses/LastOwner'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/organization-access/v1/organizations/{organization}/invitations:
+    parameters:
+      - $ref: '#/components/parameters/OrganizationInPath'
+    post:
+      tags: [external]
+      operationId: createInvitation
+      summary: Invite an address with one role on one scope.
+      description: >-
+        An Owner or an Admin on the organization, with a role that they may give. The invitation
+        offers one role on one scope of the organization to one address, is valid for seven days
+        by the database's time, and carries no secret (Organization Access ADR 0001). Creating it
+        never looks the address up, so the answer tells nobody whether the address has an
+        account. The transaction writes the audit record and `InvitationIssued`, which names the
+        invitation and carries no address. Addresses are compared as whole strings without regard
+        to case, and nothing is stripped or folded beyond that. An organization issues or sends
+        again at most 100 invitations in 24 hours and holds at most 500 pending ones. A repeat with
+        the same `Idempotency-Key` and the same body gets the first answer (ADR 0062), so a lost
+        answer never creates a second invitation.
+      security:
+        - internalToken: []
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InvitationCreation'
+      responses:
+        '201':
+          description: The invitation. A repeat with the same key and the same body gets this answer again.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Invitation'
+        '400':
+          description: >-
+            `idempotency_key_missing`: the request has no `Idempotency-Key`. `invalid_request`:
+            the request does not match this contract otherwise, or it offers Owner on a project
+            or a site.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/OrganizationAccessProblem'
+        '401':
+          $ref: '#/components/responses/TokenInvalid'
+        '403':
+          description: >-
+            `role_too_low`: the caller is not an Owner or an Admin on the organization, or offers
+            a role that they may not give. `principal_not_active`: the caller's internal token
+            carries an authority version below the minimum that Identity installed.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/OrganizationAccessProblem'
+        '404':
+          description: '`not_found`: the organization does not exist, the caller may not know of it, or the scope is not a registered scope of this organization.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/OrganizationAccessProblem'
+        '409':
+          description: >-
+            `invitation_pending`: the organization already has a pending invitation for the
+            address, also an expired one that was neither sent again nor revoked.
+            `invitations_pending_limit`: the organization already holds 500 pending invitations.
+            `idempotency_key_in_progress`: a request with the same key has not finished.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/OrganizationAccessProblem'
+        '422':
+          $ref: '#/components/responses/IdempotencyKeyReused'
+        '429':
+          $ref: '#/components/responses/InvitationRateLimit'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+    get:
+      tags: [external]
+      operationId: listInvitations
+      summary: List the organization's pending invitations.
+      description: >-
+        An Owner or an Admin on the organization. Every pending invitation, also an expired one,
+        which stays the pending one for its address until it is sent again or revoked. An
+        organization holds at most 500. Anybody else gets 404.
+      security:
+        - internalToken: []
+      responses:
+        '200':
+          description: The pending invitations.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InvitationList'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/TokenInvalid'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/organization-access/v1/organizations/{organization}/invitations/{invitation}/resend:
+    parameters:
+      - $ref: '#/components/parameters/OrganizationInPath'
+      - $ref: '#/components/parameters/InvitationInPath'
+    post:
+      tags: [external]
+      operationId: resendInvitation
+      summary: Send a pending invitation again.
+      description: >-
+        An Owner or an Admin on the organization. Starts the seven days again and writes a new
+        `InvitationIssued`, on which Notifications sends a new email. It creates nothing, so it
+        takes no `Idempotency-Key`, and each call counts towards the limit of 100 in 24 hours.
+      security:
+        - internalToken: []
+      responses:
+        '202':
+          description: The invitation with its new expiry. The email follows.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Invitation'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/TokenInvalid'
+        '403':
+          $ref: '#/components/responses/RoleTooLowOrPrincipalNotActive'
+        '404':
+          $ref: '#/components/responses/InvitationNotPending'
+        '429':
+          $ref: '#/components/responses/InvitationRateLimit'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/organization-access/v1/organizations/{organization}/invitations/{invitation}:
+    parameters:
+      - $ref: '#/components/parameters/OrganizationInPath'
+      - $ref: '#/components/parameters/InvitationInPath'
+    delete:
+      tags: [external]
+      operationId: revokeInvitation
+      summary: Revoke a pending invitation.
+      description: >-
+        An Owner or an Admin on the organization. A revoked invitation can no longer be accepted,
+        and Notifications' lookup answers it as not valid. Revoking an invitation that is already
+        revoked changes nothing and is answered 204 too.
+      security:
+        - internalToken: []
+      responses:
+        '204':
+          description: The invitation is revoked.
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/TokenInvalid'
+        '403':
+          $ref: '#/components/responses/RoleTooLowOrPrincipalNotActive'
+        '404':
+          description: '`not_found`: the organization does not exist, the caller may not know of it, or it has no invitation with this identifier that is pending or revoked.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/OrganizationAccessProblem'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/organization-access/v1/organizations/{organization}/operations/{operation}:
+    parameters:
+      - $ref: '#/components/parameters/OrganizationInPath'
+      - $ref: '#/components/parameters/OperationInPath'
+    get:
+      tags: [external]
+      operationId: getOperation
+      summary: Read the progress of a removal.
+      description: >-
+        An Owner or an Admin on the organization. An operation
+        is in progress until every step is done, and then succeeded. A registered domain service
+        that cannot be reached keeps its step pending and the operation in progress, and nothing
+        is taken off the list to finish one. Anybody else gets 404.
+      security:
+        - internalToken: []
+      responses:
+        '200':
+          description: The operation and its steps.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Operation'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/TokenInvalid'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/organization-access/v1/invitations:
+    get:
+      tags: [external]
+      operationId: listMyInvitations
+      summary: List the invitations for the caller's verified address.
+      description: >-
+        Any signed-in principal. Organization Access looks the caller up at Identity, whose
+        address is always verified, and lists every invitation for that address that is pending
+        and has not expired, so each one listed can be accepted. Invitations for another address
+        are never listed.
+      security:
+        - internalToken: []
+      responses:
+        '200':
+          description: The caller's invitations.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MyInvitationList'
+        '401':
+          $ref: '#/components/responses/TokenInvalid'
+        '503':
+          $ref: '#/components/responses/UnavailableWithLookup'
+  /api/organization-access/v1/invitations/{invitation}/acceptance:
+    parameters:
+      - $ref: '#/components/parameters/InvitationInPath'
+    post:
+      tags: [external]
+      operationId: acceptInvitation
+      summary: Accept an invitation.
+      description: >-
+        The principal whose verified address matches the invitation's, which Organization Access
+        looks up at Identity. The invitation must be pending and not expired. One transaction
+        locks it, creates the member with a new membership identifier or makes a removed member
+        active again under their old one, gives the offered role, marks the invitation accepted,
+        and writes the audit record and `MemberJoined`. Two acceptances at the same moment make
+        one member. A repeat by the principal who accepted it is answered 409 `already_member`,
+        because they are now an active member. An invitation for another address is answered
+        404, like one that does not exist.
+      security:
+        - internalToken: []
+      responses:
+        '200':
+          description: The caller's membership of the invitation's organization.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Membership'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/TokenInvalid'
+        '403':
+          $ref: '#/components/responses/PrincipalNotActive'
+        '404':
+          description: >-
+            `not_found`: no invitation has this identifier, it is for another address, or it is
+            no longer pending or has expired.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/OrganizationAccessProblem'
+        '409':
+          description: >-
+            `already_member`: the caller is already an active member of the organization, also
+            after accepting this invitation. `removal_in_progress`: the caller's membership was removed
+            and the removal has not succeeded yet.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/OrganizationAccessProblem'
+        '503':
+          $ref: '#/components/responses/UnavailableWithLookup'
+  /internal/v1/role:
+    get:
+      tags: [internal]
+      operationId: getRole
+      summary: Answer which role a principal holds on a scope now.
+      description: >-
+        The role question (ADR 0056), which the shared service library asks with a deadline of
+        250 ms and no retry. Made for a caller, the call carries the caller's internal token, and
+        the question is about the token's principal, so `principal` is absent. Made with no user,
+        it carries a workload token whose `operations` include `getRole`, and `principal` names
+        the principal (ADR 0040). The role that counts is the highest that the member holds on
+        the scope or on a scope that contains it. `none` is an answer and not an error: a
+        principal who is no member of the scope's organization, a removed member and a scope that
+        was never registered all get it. One call answers for one scope.
+      security:
+        - internalToken: []
+        - workloadToken: []
+      parameters:
+        - name: kind
+          in: query
+          required: true
+          schema:
+            $ref: '#/components/schemas/ScopeKind'
+        - name: scope
+          in: query
+          required: true
+          description: The scope's identifier, which for an organization is the organization's.
+          schema:
+            $ref: '#/components/schemas/ScopeId'
+        - name: principal
+          in: query
+          required: false
+          description: The principal asked about. Required with a workload token, and absent with an internal token.
+          schema:
+            $ref: '#/components/schemas/PrincipalId'
+      responses:
+        '200':
+          description: The role answer.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RoleAnswer'
+        '400':
+          description: >-
+            `invalid_request`: the request does not match this contract, it names no principal
+            with a workload token, or it names one with an internal token.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/OrganizationAccessProblem'
+        '401':
+          $ref: '#/components/responses/TokenInvalid'
+        '403':
+          $ref: '#/components/responses/OperationNotPermitted'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /internal/v1/scopes:
+    get:
+      tags: [internal]
+      operationId: listScopes
+      summary: List the scopes on which the caller holds a role.
+      description: >-
+        The scopes question. The call carries the caller's internal token, and lists every scope
+        on which the token's principal holds a role itself, in every organization of which they
+        are an active member, each with that role and the scopes that contain it. A role on an
+        organization stands for all its projects and sites, so the list is short. The shared
+        service library caches it by the rules of the role answer.
+      security:
+        - internalToken: []
+      responses:
+        '200':
+          description: The caller's scopes.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScopeList'
+        '401':
+          $ref: '#/components/responses/TokenInvalid'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /internal/v1/scopes/{kind}/{scope}:
+    parameters:
+      - name: kind
+        in: path
+        required: true
+        schema:
+          $ref: '#/components/schemas/RegisteredScopeKind'
+      - name: scope
+        in: path
+        required: true
+        description: The identifier that the scope's owner gave the project or the site.
+        schema:
+          $ref: '#/components/schemas/ScopeId'
+    put:
+      tags: [internal]
+      operationId: registerScope
+      summary: Register a project or a site.
+      description: >-
+        Projects registers a project in its organization, and Sites a site in a project of its
+        organization, with a workload token whose `operations` include `registerScope`. The
+        access file lists both for this one operation, so Organization Access accepts the kind
+        `project` only from Projects and `site` only from Sites, as the `sub` claim of the
+        workload token names the caller. A registration records that the scope exists and what
+        contains it; it decides nothing about who may create it. A repeat gets the same answer,
+        so Projects repeats it until it has one. Phase 1 has no operation that removes or moves a
+        scope.
+      security:
+        - workloadToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScopeRegistration'
+      responses:
+        '200':
+          description: The registered scope, the same for every repeat.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegisteredScope'
+        '400':
+          description: >-
+            `invalid_request`: the request does not match this contract, it names a project for
+            a project, or it names no project for a site.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/OrganizationAccessProblem'
+        '401':
+          $ref: '#/components/responses/TokenInvalid'
+        '403':
+          description: >-
+            `operation_not_permitted`: the workload token does not permit `registerScope`.
+            `kind_not_permitted`: the caller may not register a scope of this kind, because only
+            Projects registers a project and only Sites a site.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/OrganizationAccessProblem'
+        '404':
+          description: '`not_found`: the organization does not exist, or the project of a site is not a registered project of that organization.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/OrganizationAccessProblem'
+        '409':
+          description: '`scope_conflict`: the scope is registered with another organization or another project.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/OrganizationAccessProblem'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /internal/v1/invitations/{invitation}:
+    parameters:
+      - $ref: '#/components/parameters/InvitationInPath'
+    get:
+      tags: [internal]
+      operationId: lookUpInvitation
+      summary: Look up an invitation for its email.
+      description: >-
+        Notifications' lookup, with a workload token whose `operations` include
+        `lookUpInvitation` (ADR 0053). It answers the invited person's address, whether the
+        invitation is still valid, the organization's name and the role offered. An invitation
+        is valid while it is pending and has not expired; an accepted, a revoked and an expired
+        one are not.
+      security:
+        - workloadToken: []
+      responses:
+        '200':
+          description: The invitation's address, validity, organization name and role.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InvitationLookup'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/TokenInvalid'
+        '403':
+          $ref: '#/components/responses/OperationNotPermitted'
+        '404':
+          description: >-
+            `not_found`: Organization Access does not know the invitation, for example after a
+            restore, or its address has already been removed, 30 days after it ended.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/OrganizationAccessProblem'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /internal/v1/minimum-authority-versions/{kind}/{id}:
+    $ref: '../shared/minimum-authority-version.yaml#/paths/~1internal~1v1~1minimum-authority-versions~1{kind}~1{id}'
+components:
+  securitySchemes:
+    internalToken:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >-
+        The caller's internal token, which Edge put in place of the session cookie once Identity
+        admitted the request, and which a domain service passes on when it calls for that caller:
+        `typ` `internal+jwt`, issuer `urn:contelys:identity`, audience
+        `urn:contelys:domain-services`, and the principal's authority version (ADR 0052).
+    workloadToken:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >-
+        A workload token of the calling deployable: `typ` `workload+jwt`, issuer
+        `urn:contelys:identity`, audience `urn:contelys:organization-access`, and the
+        `operationId` of the operation among its `operations`, which Identity issues as
+        `access/organization-access.yaml` permits (ADR 0040, ADR 0052). The shared operation
+        names this scheme too.
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: >-
+        A UUID that the client chooses, scoped to the caller and the operation, and kept with a
+        digest of the body and the response for 24 hours (ADR 0062). A request without it is
+        answered 400 `idempotency_key_missing`.
+      schema:
+        type: string
+        format: uuid
+        pattern: '^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$'
+    OrganizationInPath:
+      name: organization
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/OrganizationId'
+    PrincipalInPath:
+      name: principal
+      in: path
+      required: true
+      description: The member, named by their principal.
+      schema:
+        $ref: '#/components/schemas/PrincipalId'
+    KindInPath:
+      name: kind
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/ScopeKind'
+    ScopeInPath:
+      name: scope
+      in: path
+      required: true
+      description: The scope's identifier, which for an organization is the organization's.
+      schema:
+        $ref: '#/components/schemas/ScopeId'
+    InvitationInPath:
+      name: invitation
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/InvitationId'
+    OperationInPath:
+      name: operation
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/OperationId'
+    CursorInQuery:
+      name: cursor
+      in: query
+      required: false
+      description: The `next` of the previous page. Without it, the first page.
+      schema:
+        $ref: '#/components/schemas/Cursor'
+  responses:
+    InvalidRequest:
+      description: '`invalid_request`: the request does not match this contract.'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/OrganizationAccessProblem'
+    InvalidRequestOrKeyMissing:
+      description: >-
+        `idempotency_key_missing`: the request has no `Idempotency-Key`. `invalid_request`: the
+        request does not match this contract otherwise.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/OrganizationAccessProblem'
+    TokenInvalid:
+      description: '`token_invalid`: the token is missing, expired, altered, of the wrong kind, or for another audience.'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/OrganizationAccessProblem'
+    OperationNotPermitted:
+      description: '`operation_not_permitted`: the workload token does not permit this operation.'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/OrganizationAccessProblem'
+    PrincipalNotActive:
+      description: '`principal_not_active`: the caller''s internal token carries an authority version below the minimum that Identity installed, because the principal is disabled or erased.'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/OrganizationAccessProblem'
+    RoleTooLowOrPrincipalNotActive:
+      description: >-
+        `role_too_low`: the caller's role does not allow the change (Organization Access's detailed design, section 03).
+        `principal_not_active`: the caller's internal token carries an authority version below the
+        minimum that Identity installed, because the principal is disabled or erased.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/OrganizationAccessProblem'
+    NotFound:
+      description: '`not_found`: what the path names does not exist, or the caller may not know of it.'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/OrganizationAccessProblem'
+    InvitationNotPending:
+      description: '`not_found`: the organization does not exist, the caller may not know of it, or the organization has no pending invitation with this identifier.'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/OrganizationAccessProblem'
+    LastOwner:
+      description: '`last_owner`: the change would leave the organization without an Owner.'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/OrganizationAccessProblem'
+    IdempotencyKeyInProgress:
+      description: '`idempotency_key_in_progress`: a request with the same key has not finished.'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/OrganizationAccessProblem'
+    IdempotencyKeyReused:
+      description: '`idempotency_key_reused`: the key was used with another body.'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/OrganizationAccessProblem'
+    InvitationRateLimit:
+      description: '`invitation_rate_limit`: the organization has issued or sent again 100 invitations in the last 24 hours.'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/OrganizationAccessProblem'
+    Unavailable:
+      description: '`unavailable`: Organization Access cannot read its database or cannot establish the key set that verifies tokens.'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/OrganizationAccessProblem'
+    UnavailableWithLookup:
+      description: '`unavailable`: Organization Access cannot read its database or cannot establish the key set, or the lookup at Identity that the answer needs has failed.'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/OrganizationAccessProblem'
+  schemas:
+    OrganizationAccessErrorCode:
+      type: string
+      description: Every code that Organization Access answers, except those of the shared operation. Adding one is an additive change, and removing one is not.
+      enum:
+        - invalid_request
+        - idempotency_key_missing
+        - token_invalid
+        - operation_not_permitted
+        - kind_not_permitted
+        - role_too_low
+        - principal_not_active
+        - not_found
+        - last_owner
+        - invitation_pending
+        - already_member
+        - removal_in_progress
+        - scope_conflict
+        - invitations_pending_limit
+        - idempotency_key_in_progress
+        - idempotency_key_reused
+        - invitation_rate_limit
+        - unavailable
+    OrganizationAccessProblem:
+      description: The problem body of ADR 0054 with one of Organization Access's codes.
+      allOf:
+        - $ref: '../shared/problem.yaml#/components/schemas/Problem'
+        - type: object
+          properties:
+            code:
+              $ref: '#/components/schemas/OrganizationAccessErrorCode'
+    OrganizationId:
+      type: string
+      description: The identifier of an organization. It is random, never reused, and opaque to every caller, which compares it as a string.
+      pattern: '^[A-Za-z0-9-]{1,64}$'
+    PrincipalId:
+      type: string
+      description: The identifier of a principal, as `PrincipalId` in Identity's contract.
+      pattern: '^[A-Za-z0-9-]{1,64}$'
+    MembershipId:
+      type: string
+      description: >-
+        The identifier of a membership, one principal in one organization. It is random, never
+        reused, and kept when a removed person joins again. It is the `id` of the kind
+        `membership` in the shared operation, so it fits `PrincipalOrMembershipId` there
+        (ADR 0068).
+      pattern: '^[A-Za-z0-9-]{1,64}$'
+    ScopeKind:
+      type: string
+      description: The kind of a scope. A project lies in one organization, and a site in one project.
+      enum: [organization, project, site]
+    RegisteredScopeKind:
+      type: string
+      description: The kinds of scope that their owners register. An organization is created here.
+      enum: [project, site]
+    ScopeId:
+      type: string
+      description: >-
+        The identifier of an organization, a project or a site. A project's or a site's is the one
+        that Projects or Sites gave it. Opaque, and compared as a string.
+      pattern: '^[A-Za-z0-9-]{1,64}$'
+    InvitationId:
+      type: string
+      description: The identifier of an invitation. It is random, never reused, and no secret.
+      pattern: '^[A-Za-z0-9-]{1,64}$'
+    OperationId:
+      type: string
+      description: The identifier of an operation, which `MemberRemoved` carries too.
+      pattern: '^[A-Za-z0-9-]{1,64}$'
+    Cursor:
+      type: string
+      description: Where the next page starts. Opaque to the caller.
+      pattern: '^[A-Za-z0-9_-]{1,256}$'
+    Address:
+      type: string
+      format: email
+      maxLength: 254
+      description: An email address.
+    Name:
+      type: string
+      minLength: 1
+      maxLength: 255
+      description: A person's name, as one value, which Identity answers.
+    OrganizationName:
+      type: string
+      minLength: 1
+      maxLength: 255
+      description: The name of an organization, which need not be unique.
+    Role:
+      type: string
+      description: >-
+        A role. Viewer, Editor, Publisher and Admin form one ladder, each including the one
+        before. Owner is held on the organization alone and includes Admin (ADR 0055).
+      enum: [viewer, editor, publisher, admin, owner]
+    RoleOrNone:
+      type: string
+      description: A role, or `none` when the principal holds no role that counts.
+      enum: [none, viewer, editor, publisher, admin, owner]
+    ScopeRef:
+      type: object
+      required: [kind, id]
+      properties:
+        kind:
+          $ref: '#/components/schemas/ScopeKind'
+        id:
+          $ref: '#/components/schemas/ScopeId'
+    RoleOnScope:
+      type: object
+      required: [scope, role]
+      properties:
+        scope:
+          $ref: '#/components/schemas/ScopeRef'
+        role:
+          $ref: '#/components/schemas/Role'
+    OrganizationCreation:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          $ref: '#/components/schemas/OrganizationName'
+    Organization:
+      type: object
+      required: [id, name, role]
+      properties:
+        id:
+          $ref: '#/components/schemas/OrganizationId'
+        name:
+          $ref: '#/components/schemas/OrganizationName'
+        role:
+          allOf:
+            - $ref: '#/components/schemas/RoleOrNone'
+          description: The caller's role on the organization itself.
+    OrganizationList:
+      type: object
+      required: [organizations]
+      properties:
+        organizations:
+          type: array
+          items:
+            $ref: '#/components/schemas/Organization'
+    OrganizationSummary:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          $ref: '#/components/schemas/OrganizationId'
+        name:
+          $ref: '#/components/schemas/OrganizationName'
+    Member:
+      type: object
+      required: [principal, roles]
+      properties:
+        principal:
+          $ref: '#/components/schemas/PrincipalId'
+        name:
+          allOf:
+            - $ref: '#/components/schemas/Name'
+          description: Absent when Identity answers the principal as erased, or does not know it.
+        roles:
+          type: array
+          description: The roles that the member holds, each on its scope. Empty for a member with no role.
+          items:
+            $ref: '#/components/schemas/RoleOnScope'
+    MemberPage:
+      type: object
+      required: [members]
+      properties:
+        members:
+          type: array
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/Member'
+        next:
+          allOf:
+            - $ref: '#/components/schemas/Cursor'
+          description: Present when another page follows.
+    Membership:
+      type: object
+      required: [organization, principal, roles]
+      properties:
+        organization:
+          $ref: '#/components/schemas/OrganizationSummary'
+        principal:
+          $ref: '#/components/schemas/PrincipalId'
+        roles:
+          type: array
+          items:
+            $ref: '#/components/schemas/RoleOnScope'
+    RoleToGive:
+      type: object
+      additionalProperties: false
+      required: [role]
+      properties:
+        role:
+          $ref: '#/components/schemas/Role'
+    InvitationCreation:
+      type: object
+      additionalProperties: false
+      required: [address, role, scope]
+      properties:
+        address:
+          $ref: '#/components/schemas/Address'
+        role:
+          $ref: '#/components/schemas/Role'
+        scope:
+          $ref: '#/components/schemas/ScopeRef'
+    Invitation:
+      type: object
+      description: A pending invitation, as an Owner or an Admin on its organization sees it.
+      required: [id, address, role, scope, invitedBy, expiresAt]
+      properties:
+        id:
+          $ref: '#/components/schemas/InvitationId'
+        address:
+          $ref: '#/components/schemas/Address'
+        role:
+          $ref: '#/components/schemas/Role'
+        scope:
+          $ref: '#/components/schemas/ScopeRef'
+        invitedBy:
+          allOf:
+            - $ref: '#/components/schemas/PrincipalId'
+          description: The principal who created the invitation. Sending it again does not change it.
+        expiresAt:
+          type: string
+          format: date-time
+          description: Seven days after it was created or last sent again. An invitation past it is still pending, and cannot be accepted.
+    InvitationList:
+      type: object
+      required: [invitations]
+      properties:
+        invitations:
+          type: array
+          maxItems: 500
+          items:
+            $ref: '#/components/schemas/Invitation'
+    MyInvitation:
+      type: object
+      description: An invitation, as the invited person sees it.
+      required: [id, organization, role, scope, expiresAt]
+      properties:
+        id:
+          $ref: '#/components/schemas/InvitationId'
+        organization:
+          $ref: '#/components/schemas/OrganizationSummary'
+        role:
+          $ref: '#/components/schemas/Role'
+        scope:
+          $ref: '#/components/schemas/ScopeRef'
+        expiresAt:
+          type: string
+          format: date-time
+    MyInvitationList:
+      type: object
+      required: [invitations]
+      properties:
+        invitations:
+          type: array
+          items:
+            $ref: '#/components/schemas/MyInvitation'
+    OperationState:
+      type: string
+      enum: [in_progress, succeeded]
+    OperationStepState:
+      type: string
+      enum: [pending, done]
+    OperationStep:
+      type: object
+      required: [deployable, state]
+      properties:
+        deployable:
+          type: string
+          description: The slug of the registered domain service that acknowledges the new minimum.
+          pattern: '^[a-z][a-z0-9-]{0,62}$'
+        state:
+          $ref: '#/components/schemas/OperationStepState'
+    Operation:
+      type: object
+      description: The removal of a member, which succeeds once every registered domain service other than Organization Access has acknowledged the membership's new minimum authority version.
+      required: [id, principal, state, steps]
+      properties:
+        id:
+          $ref: '#/components/schemas/OperationId'
+        principal:
+          allOf:
+            - $ref: '#/components/schemas/PrincipalId'
+          description: The member removed.
+        state:
+          $ref: '#/components/schemas/OperationState'
+        steps:
+          type: array
+          items:
+            $ref: '#/components/schemas/OperationStep'
+    RoleAnswer:
+      type: object
+      required: [role, validUntil]
+      properties:
+        role:
+          $ref: '#/components/schemas/RoleOrNone'
+        membership:
+          allOf:
+            - $ref: '#/components/schemas/MembershipId'
+          description: >-
+            Present when the principal is or was a member of the scope's organization, also with
+            the role `none`. The shared service library hands it to the write barrier.
+        authorityVersion:
+          type: integer
+          format: int64
+          minimum: 1
+          description: >-
+            The membership's authority version, present with `membership` (ADR 0050). It only
+            rises, at each removal, and the write barrier compares it with the minimum it stored.
+        validUntil:
+          type: string
+          format: date-time
+          description: The time until which the answer may be used for reads, 60 seconds after it was given (ADR 0031).
+    HeldScope:
+      type: object
+      required: [scope, role, containedIn]
+      properties:
+        scope:
+          $ref: '#/components/schemas/ScopeRef'
+        role:
+          allOf:
+            - $ref: '#/components/schemas/Role'
+          description: The role held on this scope itself.
+        containedIn:
+          type: array
+          description: The scopes that contain it, the nearest first, ending with its organization. Empty for an organization.
+          maxItems: 2
+          items:
+            $ref: '#/components/schemas/ScopeRef'
+    ScopeList:
+      type: object
+      required: [scopes, validUntil]
+      properties:
+        scopes:
+          type: array
+          items:
+            $ref: '#/components/schemas/HeldScope'
+        validUntil:
+          type: string
+          format: date-time
+          description: The time until which the list may be used for reads, 60 seconds after it was given (ADR 0031).
+    ScopeRegistration:
+      type: object
+      additionalProperties: false
+      required: [organization]
+      properties:
+        organization:
+          allOf:
+            - $ref: '#/components/schemas/OrganizationId'
+          description: The organization that contains the project, or the site's project.
+        project:
+          allOf:
+            - $ref: '#/components/schemas/ScopeId'
+          description: The registered project that contains a site. Required for a site, and absent for a project.
+    RegisteredScope:
+      type: object
+      required: [kind, id, organization]
+      properties:
+        kind:
+          $ref: '#/components/schemas/RegisteredScopeKind'
+        id:
+          $ref: '#/components/schemas/ScopeId'
+        organization:
+          $ref: '#/components/schemas/OrganizationId'
+        project:
+          allOf:
+            - $ref: '#/components/schemas/ScopeId'
+          description: Present for a site.
+    InvitationLookup:
+      type: object
+      required: [address, valid, organizationName, role]
+      properties:
+        address:
+          allOf:
+            - $ref: '#/components/schemas/Address'
+          description: The invited person's address, as the inviter gave it.
+        valid:
+          type: boolean
+          description: True while the invitation is pending and has not expired, by the database's time. False for an accepted, a revoked and an expired invitation.
+        organizationName:
+          $ref: '#/components/schemas/OrganizationName'
+        role:
+          allOf:
+            - $ref: '#/components/schemas/Role'
+          description: The role offered.

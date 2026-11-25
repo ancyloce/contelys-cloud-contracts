@@ -1,0 +1,95 @@
+// The `organization` event family of Organization Access: what happened to an organization,
+// its members and its invitations. Organization Access owns these schemas, and other domains
+// subscribe to them. No event carries an address, a person's name or a credential, and none
+// carries the membership identifier, which appears only in the role answer and in the calls of
+// the shared operation that installs a minimum authority version.
+//
+// Topic and key (ADR 0061). Organization Access publishes every event of the family on the
+// topic `organization-access.organization`. The record key is the organization's identifier,
+// as the UTF-8 bytes of the string in `organization_id`, so the events of one organization keep
+// their order on one partition. The record value is one of the messages below alone, in the
+// Protobuf binary encoding. The topic keeps its events for 15 days (ADR 0029).
+//
+// Headers (ADR 0061). These six are those of the Kafka protocol binding of CloudEvents 1.0
+// in its binary mode:
+//
+//   ce_specversion  1.0
+//   ce_id           the stable event ID, which a replay keeps
+//   ce_source       organization-access
+//   ce_type         the full name of the message, such as
+//                   contelys.organization_access.v1.InvitationIssued
+//   ce_time         when Organization Access recorded the change, as an RFC 3339 timestamp
+//   content-type    application/protobuf
+//
+// The W3C headers `traceparent` and `tracestate` carry the trace context of the request that
+// wrote the event.
+//
+// The relay publishes from Organization Access's outbox at least once, so a consumer
+// deduplicates on `ce_id`. A consumer tells the messages apart by `ce_type` and skips the types
+// it does not use.
+//
+// Every message carries the organization's identifier as field 1:
+//
+//   organization_id    The organization's identifier, as Organization Access's OpenAPI contract
+//                      defines it. It is random and never reused.
+//
+// Each message that concerns a member carries the same three fields after it, under the same
+// numbers:
+//
+//   principal_id       The member's principal, as the schema `PrincipalId` of Identity's
+//                      OpenAPI contract defines it.
+//   authority_version  The membership's authority version after the change. It rises with
+//                      every removal of the member and is never lowered (ADR 0050).
+//   revision           The membership's revision after the change. Every change of a membership
+//                      raises it, so a later change carries a higher revision than an earlier
+//                      one, and a repeated event carries the same one.
+syntax = "proto3";
+
+package contelys.organization_access.v1;
+
+// An organization was created. Its first Owner's MemberJoined follows in the same transaction.
+message OrganizationCreated {
+  string organization_id = 1;
+}
+
+// A principal became a member: the creator of an organization as its first Owner, or a person
+// who accepted an invitation, which makes a removed member active again under the same
+// membership.
+message MemberJoined {
+  string organization_id = 1;
+  string principal_id = 2;
+  int64 authority_version = 3;
+  int64 revision = 4;
+}
+
+// A role of the member was given, changed or taken away. A changed role is not a strict
+// revocation, so the authority version is unchanged. A subscriber that needs the roles asks
+// Organization Access.
+message MemberRoleChanged {
+  string organization_id = 1;
+  string principal_id = 2;
+  int64 authority_version = 3;
+  int64 revision = 4;
+}
+
+// A removal committed: the member is removed, their roles are deleted and the authority version
+// of the membership is raised. Organization Access reads its own topic at every start, before it reports
+// ready, re-applies each removal it finds and recreates its operation under `operation_id`
+// (Organization Access ADR 0002).
+message MemberRemoved {
+  string organization_id = 1;
+  string principal_id = 2;
+  int64 authority_version = 3;
+  int64 revision = 4;
+  // The identifier of the removal's operation, whose progress the route of operations shows.
+  string operation_id = 5;
+}
+
+// An invitation was created or sent again. Each sending is a new event with a new `ce_id`. The
+// event carries no address: the invitation lookup of Organization Access's contract answers it
+// (ADR 0053).
+message InvitationIssued {
+  string organization_id = 1;
+  // The invitation's identifier, as Organization Access's OpenAPI contract defines it.
+  string invitation_id = 2;
+}
