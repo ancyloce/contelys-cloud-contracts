@@ -1,0 +1,154 @@
+openapi: 3.0.3
+info:
+  title: Minimum authority version
+  version: 1.0.0
+  license:
+    name: Proprietary
+  description: >-
+    The one operation through which an authority installs a new minimum authority version in a
+    registered domain service (ADR 0068). Identity installs the minimum of a principal when it
+    disables or erases the principal, and Organization Access installs the minimum of a
+    membership when it removes a member (ADR 0050). Every registered domain service serves the
+    operation through the shared service library, and its own contract refers to the path
+    below. That contract also declares a security scheme named `workloadToken`, as below,
+    because a security requirement names a scheme of the document that refers to the path. Its
+    access file sets `protected_writes` and lists the callers of
+    `installMinimumAuthorityVersion`, which `access/access-file.schema.json` restricts.
+
+
+    The service keeps the higher of the stored minimum and the one it receives, in its own
+    database, under the lock that its write barrier takes. A minimum is therefore never
+    lowered, and a repeat is harmless. The answer 204 is the acknowledgement: the stored
+    minimum is at least the one sent, and it is committed. Any other answer acknowledges
+    nothing, and the authority calls again until it gets 204. The operation takes no
+    `Idempotency-Key` (ADR 0062), because a `PUT` of a minimum that is never lowered is
+    idempotent by itself, and no path parameter can hold a slash (ADR 0048). Every error is the
+    problem body of ADR 0054 with one of the codes listed under
+    `MinimumAuthorityVersionErrorCode`.
+
+
+    Edge's internal listener addresses a deployable by its slug, so a caller reaches the path
+    below as `/<slug>/internal/v1/...` there, and a generated client takes Edge's internal
+    address followed by `/<slug>` as its base address (Edge's detailed design, section 03).
+servers:
+  - url: /
+    description: The registered domain service, on each listener that reaches it.
+tags:
+  - name: internal
+    description: Operations for other deployables, which no route fragment can claim.
+paths:
+  /internal/v1/minimum-authority-versions/{kind}/{id}:
+    parameters:
+      - name: kind
+        in: path
+        required: true
+        schema:
+          $ref: '#/components/schemas/PrincipalOrMembership'
+      - name: id
+        in: path
+        required: true
+        schema:
+          $ref: '#/components/schemas/PrincipalOrMembershipId'
+    put:
+      tags: [internal]
+      operationId: installMinimumAuthorityVersion
+      summary: Install the minimum authority version of one principal or one membership.
+      description: >-
+        Stores the minimum for the principal or the membership unless the stored one is already
+        at least as high, and answers 204 in both cases. A minimum for one that the service has
+        never seen is stored like any other, so that a later write by it is still checked. The
+        service accepts the minimum of a principal only from Identity and that of a membership
+        only from Organization Access, as the `sub` claim of the workload token names the
+        caller.
+      security:
+        - workloadToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MinimumAuthorityVersionInstallation'
+      responses:
+        '204':
+          description: The acknowledgement. The stored minimum is at least the one sent, and it is committed.
+        '400':
+          description: '`invalid_request`: the request does not match this contract.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/MinimumAuthorityVersionProblem'
+        '401':
+          description: '`token_invalid`: the workload token is missing, expired, altered, of the wrong kind, or for another deployable.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/MinimumAuthorityVersionProblem'
+        '403':
+          description: >-
+            `operation_not_permitted`: the workload token does not permit
+            `installMinimumAuthorityVersion`. `kind_not_permitted`: the caller may not install a
+            minimum of the kind in the path, because only Identity installs that of a principal
+            and only Organization Access that of a membership.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/MinimumAuthorityVersionProblem'
+        '503':
+          description: >-
+            `unavailable`: the service cannot complete the installation now, for example because
+            it cannot reach its database or cannot load Identity's key set (ADR 0052). The
+            authority calls again.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/MinimumAuthorityVersionProblem'
+components:
+  securitySchemes:
+    workloadToken:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >-
+        A workload token of the authority: `typ` `workload+jwt`, issuer `urn:contelys:identity`,
+        audience the registered domain service as `urn:contelys:<slug>`, and
+        `installMinimumAuthorityVersion` among its `operations` (ADR 0040, ADR 0052).
+  schemas:
+    PrincipalOrMembership:
+      type: string
+      description: >-
+        What the minimum belongs to: a principal, whose authority version Identity keeps, or a
+        membership, whose authority version Organization Access keeps.
+      enum: [principal, membership]
+    PrincipalOrMembershipId:
+      type: string
+      description: >-
+        The identifier of the principal, as `PrincipalId` in Identity's contract, or of the
+        membership (ADR 0068). The service compares it as a string.
+      pattern: '^[A-Za-z0-9-]{1,64}$'
+    MinimumAuthorityVersionInstallation:
+      type: object
+      additionalProperties: false
+      required: [minimumAuthorityVersion]
+      properties:
+        minimumAuthorityVersion:
+          type: integer
+          format: int64
+          minimum: 1
+          description: The lowest authority version that the service accepts in a protected write from now on.
+    MinimumAuthorityVersionErrorCode:
+      type: string
+      description: Every code that this operation answers. Adding one is an additive change, and removing one is not.
+      enum:
+        - invalid_request
+        - token_invalid
+        - operation_not_permitted
+        - kind_not_permitted
+        - unavailable
+    MinimumAuthorityVersionProblem:
+      description: The problem body of ADR 0054 with one of the codes of this operation.
+      allOf:
+        - $ref: './problem.yaml#/components/schemas/Problem'
+        - type: object
+          properties:
+            code:
+              $ref: '#/components/schemas/MinimumAuthorityVersionErrorCode'

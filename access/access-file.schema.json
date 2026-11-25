@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Access file",
+  "description": "Who may call the operations of one target deployable with a workload token, and whether the target holds protected writes (ADR 0040, ADR 0050, ADR 0058). The file is access/<target slug>.yaml, and the target's team owns it. Identity issues a workload token for a caller and a target with the operationId of each operation that lists the caller, and it refuses a pair that no operation lists. Identity and Organization Access install minimum authority versions in every target that sets protected_writes (ADR 0068).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protected_writes", "operations"],
+  "properties": {
+    "protected_writes": {
+      "type": "boolean",
+      "description": "True when the target is a registered domain service: it holds protected writes, checks them against minimum authority versions in its commits, and serves installMinimumAuthorityVersion."
+    },
+    "operations": {
+      "type": "object",
+      "description": "Each operation that a workload token may permit, keyed by its operationId in the target's contract or in a shared contract that the target serves. An operation that is not listed cannot be called with a workload token.",
+      "propertyNames": { "$ref": "#/$defs/operationId" },
+      "additionalProperties": { "$ref": "#/$defs/callers" },
+      "properties": {
+        "installMinimumAuthorityVersion": {
+          "description": "Only Identity and Organization Access install minimum authority versions (ADR 0068).",
+          "items": { "enum": ["identity", "organization-access"] }
+        }
+      }
+    }
+  },
+  "if": {
+    "required": ["protected_writes"],
+    "properties": { "protected_writes": { "const": true } }
+  },
+  "then": {
+    "properties": {
+      "operations": {
+        "required": ["installMinimumAuthorityVersion"],
+        "properties": {
+          "installMinimumAuthorityVersion": {
+            "description": "Identity installs the minimum of a principal in every registered domain service (ADR 0050).",
+            "contains": { "const": "identity" }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "operationId": {
+      "type": "string",
+      "description": "An operationId of OpenAPI, in lower camel case.",
+      "pattern": "^[a-z][A-Za-z0-9]{0,127}$"
+    },
+    "slug": {
+      "type": "string",
+      "description": "The slug of a deployable.",
+      "pattern": "^[a-z][a-z0-9-]{0,62}$"
+    },
+    "callers": {
+      "type": "array",
+      "description": "The slugs of the deployables that may call the operation.",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/slug" }
+    }
+  }
+}

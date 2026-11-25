@@ -1,0 +1,8 @@
+# Who may call Identity's operations with a workload token, in the form of
+# access-file.schema.json. Identity holds no protected writes, so it is no registered
+# domain service. Its other internal operations take no workload token: the authentication
+# endpoint takes Edge's client certificate, the key set is open, a workload token is requested
+# with the deployable's secret, and the back-channel logout carries Keycloak's logout token.
+protected_writes: false
+operations:
+  lookUpPrincipals: [notifications, organization-access]
