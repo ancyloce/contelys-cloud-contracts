@@ -411,10 +411,11 @@ paths:
       summary: Look up 1 to 100 principals.
       description: >-
         Answers each principal that Identity knows with its state, and with its name and its
-        address unless it is erased, and lists the identifiers that it does not know. The
-        address is always verified, because a principal is created only from a verified address.
-        A single lookup is a call with one identifier. The caller needs a workload token whose
-        `operations` include `lookUpPrincipals`.
+        address unless it is erased, and lists the identifiers that it does not know. Each
+        requested identifier appears exactly once in the answer, in `principals` or in `unknown`.
+        The address is always verified, because a principal is created only from a verified
+        address. A single lookup is a call with one identifier. The caller needs a workload
+        token whose `operations` include `lookUpPrincipals`.
       security:
         - workloadToken: []
       requestBody:
@@ -490,7 +491,12 @@ components:
       description: >-
         The internal token that Edge puts in place of the session cookie once Identity has
         admitted the request: `typ` `internal+jwt`, issuer `urn:contelys:identity`, audience
-        `urn:contelys:domain-services` (ADR 0052).
+        `urn:contelys:domain-services` (ADR 0052). Its claims are `sub`, the principal's
+        identifier as `PrincipalId`; `sid`, the session's identifier, which is not the cookie's
+        value; `authority_version`, the principal's authority version when the request was
+        admitted, an integer that a recipient compares with its stored minimum (ADR 0050);
+        `iat`, the time of admission; `exp`, 60 seconds later; and `jti`, the request ID that
+        Edge sent.
     workloadToken:
       type: http
       scheme: bearer
@@ -627,7 +633,12 @@ components:
       properties:
         token:
           type: string
-          description: A JWT with `typ` `workload+jwt`, `sub` and `aud` as `urn:contelys:<slug>`, and the `operations` claim.
+          description: >-
+            A JWT with `typ` `workload+jwt`, `iss` `urn:contelys:identity`, `sub` the calling
+            deployable and `aud` the target, each as `urn:contelys:<slug>`, `operations` the
+            `operationId` of each operation of the target that the target's access file permits
+            for that pair, and `exp` five minutes after issue, a provisional value that
+            `expiresAt` repeats.
         expiresAt:
           type: string
           format: date-time
@@ -661,6 +672,7 @@ components:
           description: Present unless the principal is erased. Always verified.
     PrincipalLookupResult:
       type: object
+      description: Each requested identifier appears exactly once, in `principals` or in `unknown`.
       required: [principals, unknown]
       properties:
         principals:
