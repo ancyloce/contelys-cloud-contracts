@@ -1,0 +1,82 @@
+// The `principal` event family of Identity: what happened to a principal or to one of its
+// sessions. Identity owns these schemas, and other domains subscribe to them. No event
+// carries an address, a name or a credential.
+//
+// Topic and key (ADR 0061). Identity publishes every event of the family on the topic
+// `identity.principal`. The record key is the principal's identifier, as the UTF-8 bytes of
+// the string in `principal_id`, so the events of one principal keep their order on one
+// partition. The record value is one of the messages below alone, in the Protobuf binary
+// encoding.
+//
+// Headers (ADR 0061). These six are those of the Kafka protocol binding of CloudEvents 1.0
+// in its binary mode:
+//
+//   ce_specversion  1.0
+//   ce_id           the stable event ID, which a replay keeps
+//   ce_source       identity
+//   ce_type         the full name of the message, such as contelys.identity.v1.PrincipalErased
+//   ce_time         when Identity recorded the change, as an RFC 3339 timestamp
+//   content-type    application/protobuf
+//
+// The W3C headers `traceparent` and `tracestate` carry the trace context.
+//
+// The relay publishes from Identity's outbox at least once, so a consumer deduplicates on
+// `ce_id`. A consumer tells the messages apart by `ce_type` and skips the types it does not
+// use.
+//
+// Every message carries the same three fields under the same numbers:
+//
+//   principal_id       The principal's identifier, as the schema `PrincipalId` of Identity's
+//                      OpenAPI contract defines it.
+//   authority_version  The principal's authority version after the change. It rises with
+//                      every strict revocation of the principal and is never lowered
+//                      (ADR 0050).
+//   revision           The principal's revision after the change. Every event of the family
+//                      raises it, so a later change of one principal carries a higher revision
+//                      than an earlier one, and a repeated event carries the same one.
+syntax = "proto3";
+
+package contelys.identity.v1;
+
+// The principal's first sign-in created it, as an active principal.
+message PrincipalRegistered {
+  string principal_id = 1;
+  int64 authority_version = 2;
+  int64 revision = 3;
+}
+
+// A disable committed. The principal is disabled, its authority version is raised, and each
+// session that the disable ended has its own SessionEnded.
+message PrincipalDisabled {
+  string principal_id = 1;
+  int64 authority_version = 2;
+  int64 revision = 3;
+}
+
+// An enable committed. The principal is active again, its authority version is not lowered,
+// and the sessions that were ended stay ended.
+message PrincipalEnabled {
+  string principal_id = 1;
+  int64 authority_version = 2;
+  int64 revision = 3;
+}
+
+// An erasure completed. Identity deleted the principal's Keycloak account and its copies of
+// the name and the address, and the principal is erased. Its identifier is never issued
+// again. Each other domain decides what happens to its own data about the principal.
+message PrincipalErased {
+  string principal_id = 1;
+  int64 authority_version = 2;
+  int64 revision = 3;
+}
+
+// A session of the principal ended, for any cause: a sign-out, a limit of the session,
+// Keycloak's back-channel logout, or a disable, which also begins every erasure.
+message SessionEnded {
+  string principal_id = 1;
+  int64 authority_version = 2;
+  int64 revision = 3;
+  // The session's identifier, which the `sid` claim of Identity's internal token carries.
+  // It is not the value of the session's cookie.
+  string session_id = 4;
+}
