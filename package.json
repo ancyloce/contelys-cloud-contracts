@@ -1,0 +1,7 @@
+{
+  "name": "@contelys/contracts",
+  "private": true,
+  "description": "The shared contracts of Contelys, consumed as an npm Git dependency at their version tag (ADR 0060)",
+  "license": "UNLICENSED",
+  "files": ["access/", "events/", "jobs/", "openapi/"]
+}

@@ -6,6 +6,10 @@
     "lint": {
       "command": "go run github.com/bufbuild/buf/cmd/buf@v1.75.0 lint && npx --yes @redocly/cli@2.83.0 lint openapi/*/*.yaml && go run github.com/santhosh-tekuri/jsonschema/cmd/jv@v0.7.0 access/access-file.schema.json access/*.yaml",
       "options": { "cwd": "{projectRoot}", "env": { "GOWORK": "off" } }
+    },
+    "breaking": {
+      "command": "bash tools/breaking.sh",
+      "options": { "cwd": "{projectRoot}", "env": { "GOWORK": "off" } }
     }
   }
 }
