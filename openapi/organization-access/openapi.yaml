@@ -26,7 +26,11 @@ info:
     identifier in a path is 1 to 64 letters, digits and hyphens, so no path parameter can hold a
     slash (ADR 0048). Every error is the problem body of ADR 0054 with one of the codes listed
     under `OrganizationAccessErrorCode`, except those of the shared operation, which lists its
-    own, and no error carries an address, a name, a credential or a token.
+    own, and no error carries an address, a name, a credential or a token. On the external
+    routes a caller can also get the answers that Edge generates itself, such as Identity's
+    refusal relayed as 401 or 403, 413, 429 for Edge's limit on each caller, and 502 to 504.
+    Only their status counts, because their body is not part of a contract (Edge's detailed
+    design, section 06; ADR 0054).
 
 
     A member is named by their principal on every external route. The membership identifier,
@@ -476,7 +480,8 @@ paths:
         Any signed-in principal. Organization Access looks the caller up at Identity, whose
         address is always verified, and lists every invitation for that address that is pending
         and has not expired, so each one listed can be accepted. Invitations for another address
-        are never listed.
+        are never listed. When Identity answers the caller without an address, as an erased or an
+        unknown principal, no invitation matches and the list is empty.
       security:
         - internalToken: []
       responses:
@@ -505,7 +510,8 @@ paths:
         and writes the audit record and `MemberJoined`. Two acceptances at the same moment make
         one member. A repeat by the principal who accepted it is answered 409 `already_member`,
         because they are now an active member. An invitation for another address is answered
-        404, like one that does not exist.
+        404, like one that does not exist, and so is every invitation when Identity answers the
+        caller without an address, as an erased or an unknown principal.
       security:
         - internalToken: []
       responses:
@@ -523,8 +529,8 @@ paths:
           $ref: '#/components/responses/PrincipalNotActive'
         '404':
           description: >-
-            `not_found`: no invitation has this identifier, it is for another address, or it is
-            no longer pending or has expired.
+            `not_found`: no invitation has this identifier, it is for another address or Identity
+            answers the caller without one, or it is no longer pending or has expired.
           content:
             application/problem+json:
               schema:
@@ -990,7 +996,11 @@ components:
       type: string
       minLength: 1
       maxLength: 255
-      description: The name of an organization, which need not be unique.
+      pattern: '^[^\x00-\x1F\x7F-\x9F]+$'
+      description: >-
+        The name of an organization, which need not be unique. It holds no control character,
+        U+0000 to U+001F and U+007F to U+009F, so that it cannot carry a line feed or a carriage return into a one-line
+        display such as an email subject.
     Role:
       type: string
       description: >-
