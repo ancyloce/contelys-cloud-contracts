@@ -14,7 +14,10 @@ info:
     The external routes under `/api/identity/v1/` are published by Edge through Identity's
     route fragment. The internal operations under `/internal/v1/` are reached through Edge's
     internal listener, except the authentication endpoint, which only Edge's loopback listener
-    reaches. No operation takes an `Idempotency-Key` (ADR 0062), and no path holds a parameter
+    reaches. The internal listener addresses Identity by its slug, so `/internal/v1/keys` is
+    `/identity/internal/v1/keys` there, and a generated client takes Edge's internal address
+    followed by `/identity` as its base address (Edge's detailed design, section 03). No
+    operation takes an `Idempotency-Key` (ADR 0062), and no path holds a parameter
     (ADR 0048). Every error is the problem body of ADR 0054 with one of the codes listed under
     `IdentityErrorCode`, and no error carries an address, a name, a credential or a token.
 servers:
@@ -219,6 +222,20 @@ paths:
         admits with 200. When it cannot read its database, or its deadline passes, it answers
         503. These four answers are the only ones, and Edge depends on that. Edge replaces every
         body, so no body reaches a caller.
+
+
+        The four answers hold for every call, so Identity refuses no input that a client controls
+        for its length or its form: a cookie that is no session's value is no session (401), an
+        `Origin` that is not the application origin breaks the cross-site rule (403), the request
+        URI is read at any length that Edge admits, and a malformed or oversized trace context is
+        ignored. A call that lacks a header that Edge always sends, or carries one outside its
+        form below, is Edge's defect, and Identity answers it 503.
+
+
+        Edge's contract test reads `x-contelys-authentication`. A change of its values is a
+        contract change that Edge reviews: the deadline stays below the timeout that Edge gives
+        this call, and both sizes stay within Edge's limit on the headers of an answer (Edge's
+        detailed design, sections 05 and 06).
       security: []
       x-contelys-authentication:
         deadlineMilliseconds: 250
@@ -229,17 +246,15 @@ paths:
         - name: __Host-session
           in: cookie
           required: false
-          description: The session cookie of the request, which Edge forwards.
+          description: The session cookie of the request, which Edge forwards. A value that is no session's, whatever its length, is no session (401).
           schema:
             type: string
-            maxLength: 128
         - name: Origin
           in: header
           required: false
-          description: The `Origin` of the request. A WebSocket handshake always carries one.
+          description: The `Origin` of the request. A WebSocket handshake always carries one. Any value other than the application origin, whatever its length, breaks the cross-site rule (403).
           schema:
             type: string
-            maxLength: 2048
         - name: X-Forwarded-Method
           in: header
           required: true
@@ -250,10 +265,10 @@ paths:
         - name: X-Forwarded-Proto
           in: header
           required: true
-          description: The scheme of the request.
+          description: The scheme of the request, `https` also for a WebSocket handshake, which is an HTTP request.
           schema:
             type: string
-            enum: [https, wss]
+            enum: [https]
         - name: X-Forwarded-Host
           in: header
           required: true
@@ -264,10 +279,9 @@ paths:
         - name: X-Forwarded-Uri
           in: header
           required: true
-          description: The path of the request with its query string.
+          description: The path of the request with its query string, at any length that Edge admits.
           schema:
             type: string
-            maxLength: 8192
         - name: X-Request-Id
           in: header
           required: true
@@ -278,16 +292,15 @@ paths:
         - name: traceparent
           in: header
           required: false
-          description: The W3C trace context of the request.
+          description: The W3C trace context of the request. Ignored when it is malformed or too long.
           schema:
             type: string
-            maxLength: 128
         - name: tracestate
           in: header
           required: false
+          description: Ignored when it is malformed or too long.
           schema:
             type: string
-            maxLength: 512
       responses:
         '200':
           description: >-
