@@ -1,0 +1,14 @@
+api-operation-id-removed err
+api-path-removed-with-deprecation err
+api-removed-with-deprecation err
+optional-response-header-removed err
+request-parameter-removed err
+request-parameter-removed-with-deprecation err
+request-property-removed err
+request-property-removed-with-deprecation err
+response-mediatype-enum-value-removed err
+response-non-success-status-removed err
+response-optional-property-removed err
+response-property-enum-value-added warn
+response-property-enum-value-removed err
+response-required-property-removed-with-deprecation err
