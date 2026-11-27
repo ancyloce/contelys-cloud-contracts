@@ -1,0 +1,23 @@
+openapi: 3.0.3
+info:
+  title: Notifications
+  version: 1.0.0
+  license:
+    name: Proprietary
+  description: >-
+    Notifications turns events of other domains into emails, sends each email at most once, and
+    records what the mail server answered. Its detailed design,
+    `services/notifications/docs/DESIGN.md`, decides what it does, and section 08 of it its
+    interfaces.
+
+
+    Notifications serves no operation in phase 1. It consumes the event families of Identity,
+    Organization Access and Projects, and calls Identity and Organization Access through Edge's
+    internal listener, but no deployable calls it and it has no route fragment. Its health
+    endpoints belong to no contract. This contract exists, with no path, so that Notifications
+    has a contract directory like every domain service under the layout standard (issue 10), and
+    any operation it gains later is an additive change of this file.
+servers:
+  - url: /
+    description: Notifications, on each listener that reaches it.
+paths: {}

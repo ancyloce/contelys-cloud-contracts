@@ -1,0 +1,7 @@
+# Who may call Notifications' operations with a workload token, in the form of
+# access-file.schema.json. Notifications serves no operation, so no caller is listed and no
+# workload token can be issued for it as a target. It holds no protected writes, so it is no
+# registered domain service and serves no operation that installs a minimum authority version
+# (ADR 0050, ADR 0068).
+protected_writes: false
+operations: {}
